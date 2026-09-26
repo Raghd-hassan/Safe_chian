@@ -1,0 +1,11 @@
+from sqlalchemy import create_engine
+from sqlalchemy.ext.automap import automap_base
+from sqlalchemy.orm import sessionmaker
+
+SQL = "mysql+pymysql://root:@localhost:3306/safechain"
+#يسوي اتصال بالخادم 
+engine = create_engine(SQL)
+#جلسات 
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+#هنا يجيب الجداول من القاعده بدل ما اسويها هنا 
+Base = automap_base()  
