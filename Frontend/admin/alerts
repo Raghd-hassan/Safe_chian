@@ -1,0 +1,883 @@
+// admin_files/alerts.dart
+import 'dart:convert';
+import 'dart:typed_data';
+import 'package:excel/excel.dart' as xl;
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'app_drawer.dart';
+import 'settings_provider.dart';
+import 'file_saver.dart';
+
+class AlertsPage extends StatefulWidget {
+  final String? truckId;
+  const AlertsPage({super.key, this.truckId});
+
+  @override
+  State<AlertsPage> createState() => _AlertsPageState();
+}
+
+class _AlertsPageState extends State<AlertsPage> {
+  final TextEditingController _truckIdController = TextEditingController();
+
+  String _dateFrom = '';
+  String _dateTo = '';
+
+  List<Map<String, dynamic>> _alerts = [];
+  bool _isLoading = false;
+  bool _isExporting = false;
+  String _authToken = '';
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (widget.truckId != null && widget.truckId!.isNotEmpty) {
+        _truckIdController.text = widget.truckId!;
+      }
+      _loadTokenAndFetch();
+    });
+  }
+
+  @override
+  void dispose() {
+    _truckIdController.dispose();
+    super.dispose();
+  }
+
+  Future<String?> _getToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('token') ?? prefs.getString('auth_token');
+  }
+
+  Future<void> _loadTokenAndFetch() async {
+    _authToken = await _getToken() ?? '';
+    if (_authToken.isNotEmpty) {
+      await _checkTokenValidity();
+      if (_authToken.isNotEmpty) _fetchAlerts();
+    } else {
+      _redirectToLogin();
+    }
+  }
+
+  Future<void> _checkTokenValidity() async {
+    if (_authToken.isEmpty) return;
+    try {
+      final response = await http
+          .get(
+            Uri.parse('http://127.0.0.1:8000/verify-token'),
+            headers: {'Authorization': 'Bearer $_authToken'},
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode != 200) {
+        await _clearTokenAndLogout();
+      }
+    } catch (e) {
+      debugPrint('Error checking token: $e');
+    }
+  }
+
+  Future<void> _clearTokenAndLogout() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('token');
+    await prefs.remove('auth_token');
+    await prefs.remove('user_role');
+    _authToken = '';
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('انتهت صلاحية الجلسة، يرجى تسجيل الدخول مرة أخرى'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) _redirectToLogin();
+      });
+    }
+  }
+
+  void _redirectToLogin() {
+    if (mounted) {
+      Navigator.of(context).pushNamedAndRemoveUntil('/', (route) => false);
+    }
+  }
+
+  Future<void> _fetchAlerts() async {
+    if (_authToken.isEmpty) {
+      _redirectToLogin();
+      return;
+    }
+
+    if (!mounted) return;
+    setState(() => _isLoading = true);
+
+    try {
+      final Map<String, String> queryParams = {};
+      if (_truckIdController.text.isNotEmpty) {
+        queryParams['truck_id'] = _truckIdController.text;
+      }
+      if (_dateFrom.isNotEmpty) queryParams['start_date'] = _dateFrom;
+      if (_dateTo.isNotEmpty) queryParams['end_date'] = _dateTo;
+
+      String queryString = '';
+      if (queryParams.isNotEmpty) {
+        queryString =
+            '?' +
+            queryParams.entries
+                .map((e) => '${e.key}=${Uri.encodeComponent(e.value)}')
+                .join('&');
+      }
+
+      final response = await http
+          .get(
+            Uri.parse('http://127.0.0.1:8000/admin/alerts$queryString'),
+            headers: {'Authorization': 'Bearer $_authToken'},
+          )
+          .timeout(const Duration(seconds: 15));
+
+      if (!mounted) return;
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final alerts = List<Map<String, dynamic>>.from(data['data'] ?? data);
+
+        debugPrint('✅ Alerts received: ${alerts.length} items');
+        if (alerts.isNotEmpty) {
+          debugPrint('First alert sample: ${alerts.first}');
+        }
+
+        setState(() {
+          _alerts = alerts;
+        });
+      } else if (response.statusCode == 401) {
+        await _clearTokenAndLogout();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('خطأ: ${response.statusCode}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('خطأ في الاتصال: ${e.toString()}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _exportToExcel() async {
+    if (_alerts.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('لا توجد بيانات للتصدير'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      return;
+    }
+    setState(() => _isExporting = true);
+    try {
+      final excel = xl.Excel.createExcel();
+      final sheet = excel['التنبيهات'];
+      excel.setDefaultSheet('التنبيهات');
+
+      final headers = [
+        'التاريخ',
+        'سبب التنبيه',
+        'رقم الشحنة',
+        'رقم الشاحنة',
+        'مدة التنبيه',
+      ];
+      for (var i = 0; i < headers.length; i++) {
+        final cell = sheet.cell(
+          xl.CellIndex.indexByColumnRow(columnIndex: i, rowIndex: 0),
+        );
+        cell.value = xl.TextCellValue(headers[i]);
+        cell.cellStyle = xl.CellStyle(
+          bold: true,
+          backgroundColorHex: xl.ExcelColor.fromHexString('#1B4332'),
+          fontColorHex: xl.ExcelColor.fromHexString('#FFFFFF'),
+        );
+      }
+
+      for (var i = 0; i < _alerts.length; i++) {
+        final a = _alerts[i];
+        final row = i + 1;
+        sheet
+            .cell(xl.CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: row))
+            .value = xl.TextCellValue(
+          a['full_date']?.toString() ?? '-',
+        );
+        sheet
+            .cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: row))
+            .value = xl.TextCellValue(
+          a['alert_reason']?.toString() ?? '-',
+        );
+        sheet
+            .cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: row))
+            .value = xl.TextCellValue(
+          a['shipment_number']?.toString() ?? '-',
+        );
+        sheet
+            .cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: row))
+            .value = xl.TextCellValue(
+          a['truck_id']?.toString() ?? '-',
+        );
+        sheet
+            .cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: row))
+            .value = xl.TextCellValue(
+          a['duration']?.toString() ?? '-',
+        );
+      }
+
+      final bytes = excel.save()!;
+      final fileName = 'alerts_${DateTime.now().millisecondsSinceEpoch}.xlsx';
+      final mimeType =
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+      await saveFile(Uint8List.fromList(bytes), fileName, mimeType);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('تم تصدير Excel بنجاح ✅'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('خطأ في تصدير Excel: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isExporting = false);
+    }
+  }
+
+  Future<void> _exportToPdf() async {
+    if (_alerts.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('لا توجد بيانات للتصدير'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      return;
+    }
+    setState(() => _isExporting = true);
+    try {
+      final font = await PdfGoogleFonts.cairoRegular();
+      final fontBold = await PdfGoogleFonts.cairoBold();
+      final pdf = pw.Document();
+
+      pdf.addPage(
+        pw.MultiPage(
+          pageFormat: PdfPageFormat.a4,
+          textDirection: pw.TextDirection.rtl,
+          build: (ctx) => [
+            pw.Text(
+              'سجل التنبيهات',
+              style: pw.TextStyle(
+                font: fontBold,
+                fontSize: 18,
+                color: PdfColor.fromHex('#1B4332'),
+              ),
+            ),
+            pw.SizedBox(height: 10),
+            pw.TableHelper.fromTextArray(
+              headers: [
+                'التاريخ',
+                'سبب التنبيه',
+                'رقم الشحنة',
+                'رقم الشاحنة',
+                'مدة التنبيه',
+              ],
+              data: _alerts
+                  .map(
+                    (a) => [
+                      a['full_date']?.toString() ?? '-',
+                      a['alert_reason']?.toString() ?? '-',
+                      a['shipment_number']?.toString() ?? '-',
+                      a['truck_id']?.toString() ?? '-',
+                      a['duration']?.toString() ?? '-',
+                    ],
+                  )
+                  .toList(),
+              headerStyle: pw.TextStyle(font: fontBold, color: PdfColors.white),
+              headerDecoration: const pw.BoxDecoration(
+                color: PdfColor.fromInt(0xFF1B4332),
+              ),
+              cellStyle: pw.TextStyle(font: font, fontSize: 9),
+              rowDecoration: const pw.BoxDecoration(),
+              oddRowDecoration: pw.BoxDecoration(
+                color: PdfColor.fromHex('#F5F5F5'),
+              ),
+              cellAlignment: pw.Alignment.center,
+            ),
+          ],
+        ),
+      );
+
+      final bytes = await pdf.save();
+      final fileName = 'alerts_${DateTime.now().millisecondsSinceEpoch}.pdf';
+      final mimeType = 'application/pdf';
+
+      await saveFile(bytes, fileName, mimeType);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('تم تصدير PDF بنجاح ✅'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('خطأ في تصدير PDF: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isExporting = false);
+    }
+  }
+
+  Future<void> _pickDate(BuildContext context, bool isFrom) async {
+    final DateTime? picked = await showDatePicker(
+      context: context,
+      initialDate: DateTime.now(),
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2030),
+      builder: (context, child) {
+        final bool isDark = Provider.of<SettingsProvider>(context).isDarkMode;
+        return Theme(
+          data: isDark ? ThemeData.dark() : ThemeData.light(),
+          child: child!,
+        );
+      },
+    );
+
+    if (picked != null && mounted) {
+      final formatted =
+          '${picked.year}-${picked.month.toString().padLeft(2, '0')}-${picked.day.toString().padLeft(2, '0')}';
+      setState(() {
+        if (isFrom) {
+          _dateFrom = formatted;
+        } else {
+          _dateTo = formatted;
+        }
+      });
+      _fetchAlerts();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Consumer<SettingsProvider>(
+      builder: (context, settingsProvider, child) {
+        final bool isDark = settingsProvider.isDarkMode;
+
+        final Color scaffoldBg = isDark
+            ? const Color(0xFF121212)
+            : const Color(0xFFC8D6CA);
+        final Color appBarBg = isDark ? Colors.black : const Color(0xFFB9E4D1);
+        final Color cardBg = isDark
+            ? const Color(0xFF1E1E1E)
+            : const Color(0xFFE0E0E0);
+        final Color contentBg = isDark
+            ? const Color(0xFF2C2C2C)
+            : const Color(0xFFC5D1C5);
+        final Color textColor = isDark ? Colors.white : Colors.black87;
+
+        return Scaffold(
+          backgroundColor: scaffoldBg,
+          drawer: const SafeChainDrawer(),
+          appBar: AppBar(
+            backgroundColor: appBarBg,
+            elevation: 0,
+            centerTitle: true,
+            leading: Builder(
+              builder: (context) => IconButton(
+                icon: Icon(Icons.menu, color: textColor),
+                onPressed: () => Scaffold.of(context).openDrawer(),
+              ),
+            ),
+            actions: [
+              IconButton(
+                icon: Icon(Icons.logout, color: textColor),
+                onPressed: () async {
+                  await _clearTokenAndLogout();
+                },
+              ),
+              Padding(
+                padding: const EdgeInsets.all(8.0),
+                child: CircleAvatar(
+                  backgroundColor: isDark ? Colors.grey[800] : Colors.white,
+                  backgroundImage: const AssetImage('assets/logo.png'),
+                ),
+              ),
+            ],
+            title: Text(
+              'سجل التنبيهات',
+              style: TextStyle(
+                color: textColor,
+                fontWeight: FontWeight.bold,
+                fontSize: 18,
+              ),
+            ),
+          ),
+          body: SafeArea(
+            child: Column(
+              children: [
+                Container(
+                  margin: const EdgeInsets.only(top: 20, left: 15, right: 15),
+                  height: 20,
+                  decoration: BoxDecoration(
+                    color: cardBg,
+                    borderRadius: const BorderRadius.only(
+                      topLeft: Radius.circular(30),
+                      topRight: Radius.circular(30),
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 15),
+                    padding: const EdgeInsets.all(15),
+                    decoration: BoxDecoration(
+                      color: contentBg,
+                      borderRadius: const BorderRadius.only(
+                        bottomLeft: Radius.circular(30),
+                        bottomRight: Radius.circular(30),
+                      ),
+                    ),
+                    child: SingleChildScrollView(
+                      child: Column(
+                        children: [
+                          _buildTextField(
+                            isDark,
+                            _truckIdController,
+                            'رقم الشاحنة',
+                            Icons.edit,
+                          ),
+                          const SizedBox(height: 15),
+                          Row(
+                            children: [
+                              _buildApplyButton(),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: _buildDateField(
+                                  isDark,
+                                  _dateFrom.isEmpty ? 'من' : _dateFrom,
+                                  'من',
+                                  () => _pickDate(context, true),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: _buildDateField(
+                                  isDark,
+                                  _dateTo.isEmpty ? 'إلى' : _dateTo,
+                                  'إلى',
+                                  () => _pickDate(context, false),
+                                ),
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.only(left: 8.0),
+                                child: Text(
+                                  'مدة الرحلة',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                    color: textColor,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 25),
+                          _buildAlertsTable(isDark),
+                          const SizedBox(height: 30),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: [
+                              _buildExportButton(
+                                'تصدير Excel',
+                                Icons.table_chart,
+                                _exportToExcel,
+                                isDark,
+                              ),
+                              _buildExportButton(
+                                'تصدير PDF',
+                                Icons.picture_as_pdf,
+                                _exportToPdf,
+                                isDark,
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 20),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildTextField(
+    bool isDark,
+    TextEditingController? controller,
+    String hint,
+    IconData icon, {
+    bool isSearch = false,
+  }) {
+    return Container(
+      height: 40,
+      decoration: BoxDecoration(
+        color: isDark
+            ? const Color(0xFF1E1E1E)
+            : Colors.white.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: TextField(
+        controller: controller,
+        textAlign: TextAlign.right,
+        style: TextStyle(
+          fontSize: 12,
+          color: isDark ? Colors.white : Colors.black,
+        ),
+        onSubmitted: (value) {
+          // Trigger search when user presses Enter
+          _fetchAlerts();
+        },
+        decoration: InputDecoration(
+          prefixIcon: !isSearch
+              ? Icon(icon, size: 16, color: Colors.grey)
+              : null,
+          suffixIcon: isSearch
+              ? Icon(icon, size: 20, color: Colors.grey)
+              : null,
+          hintText: hint,
+          hintStyle: const TextStyle(color: Colors.grey),
+          border: InputBorder.none,
+          contentPadding: const EdgeInsets.symmetric(
+            vertical: 10,
+            horizontal: 10,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDateField(
+    bool isDark,
+    String date,
+    String label,
+    VoidCallback onTap,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.bold,
+            color: isDark ? Colors.white70 : Colors.black,
+          ),
+        ),
+        const SizedBox(height: 4),
+        GestureDetector(
+          onTap: onTap,
+          child: Container(
+            height: 30,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: isDark ? Colors.grey[800] : Colors.white,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              date,
+              style: TextStyle(
+                fontSize: 10,
+                color: isDark ? Colors.white : Colors.black87,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildApplyButton() {
+    return Container(
+      margin: const EdgeInsets.only(top: 18),
+      child: ElevatedButton(
+        onPressed: _fetchAlerts,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: const Color(0xFF1B4332),
+          minimumSize: const Size(60, 30),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+        child: const Text(
+          'تطبيق',
+          style: TextStyle(color: Colors.white, fontSize: 11),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAlertsTable(bool isDark) {
+    debugPrint('🔍 Building table with ${_alerts.length} alerts');
+    debugPrint('🔍 isLoading: $_isLoading');
+
+    if (_isLoading) {
+      return const Padding(
+        padding: EdgeInsets.all(40),
+        child: Center(
+          child: CircularProgressIndicator(color: Color(0xFF1B4332)),
+        ),
+      );
+    }
+
+    if (_alerts.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.all(40),
+        child: Text(
+          'لا توجد تنبيهات، ابحث برقم الشاحنة أو التاريخ',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: 14,
+            color: isDark ? Colors.white54 : Colors.black54,
+          ),
+        ),
+      );
+    }
+
+    debugPrint('🎨 Rendering table with ${_alerts.length} rows');
+
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(15),
+        color: isDark ? const Color(0xFF333333) : Colors.white,
+        boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 10)],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: DataTable(
+          headingRowColor: MaterialStateProperty.all(const Color(0xFF1B4332)),
+          columns: const [
+            DataColumn(
+              label: Text(
+                'التاريخ',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            DataColumn(
+              label: Text(
+                'سبب التنبيه',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            DataColumn(
+              label: Text(
+                'رقم الشحنة',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            DataColumn(
+              label: Text(
+                'رقم الشاحنة',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            DataColumn(
+              label: Text(
+                'مدة التنبيه',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+          rows: _alerts.map((alert) {
+            return DataRow(
+              cells: [
+                DataCell(
+                  Text(
+                    alert['full_date']?.toString() ?? '-',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: isDark ? Colors.white70 : Colors.black87,
+                    ),
+                  ),
+                ),
+                DataCell(
+                  Text(
+                    alert['alert_reason']?.toString() ?? '-',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: isDark ? Colors.white70 : Colors.black87,
+                    ),
+                  ),
+                ),
+                DataCell(
+                  Text(
+                    alert['shipment_number']?.toString() ?? '-',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: isDark ? Colors.white70 : Colors.black87,
+                    ),
+                  ),
+                ),
+                DataCell(
+                  Text(
+                    alert['truck_id']?.toString() ?? '-',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: isDark ? Colors.white70 : Colors.black87,
+                    ),
+                  ),
+                ),
+                DataCell(
+                  Text(
+                    alert['duration']?.toString() ?? '-',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: isDark ? Colors.white70 : Colors.black87,
+                    ),
+                  ),
+                ),
+              ],
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+
+  TableRow _tableHeader(List<String> titles, bool isDark) {
+    return TableRow(
+      decoration: const BoxDecoration(color: Color(0xFF1B4332)),
+      children: titles
+          .map(
+            (t) => Padding(
+              padding: const EdgeInsets.all(10.0),
+              child: Text(
+                t,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 10,
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          )
+          .toList(),
+    );
+  }
+
+  TableRow _tableRow(List<String> cells, Color color, bool isDark) {
+    return TableRow(
+      decoration: BoxDecoration(color: color),
+      children: cells
+          .map(
+            (c) => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 2),
+              child: Text(
+                c,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 9,
+                  fontWeight: FontWeight.w500,
+                  color: isDark ? Colors.white70 : Colors.black87,
+                ),
+              ),
+            ),
+          )
+          .toList(),
+    );
+  }
+
+  Widget _buildExportButton(
+    String title,
+    IconData icon,
+    VoidCallback onPressed,
+    bool isDark,
+  ) {
+    return ElevatedButton.icon(
+      onPressed: _isExporting ? null : onPressed,
+      icon: _isExporting
+          ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Colors.white,
+              ),
+            )
+          : Icon(icon, size: 18, color: Colors.white),
+      label: Text(
+        title,
+        style: const TextStyle(color: Colors.white, fontSize: 12),
+      ),
+      style: ElevatedButton.styleFrom(
+        backgroundColor: const Color(0xFF1B4332),
+        padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 10),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ),
+    );
+  }
+}
