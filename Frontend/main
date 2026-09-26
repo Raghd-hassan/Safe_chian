@@ -1,0 +1,1091 @@
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:safe_chain/admin_files/log_out.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http/http.dart' as http;
+
+// استيراد ملفات المسؤول (Admin)
+import 'admin_files/home.dart' as admin;
+import 'admin_files/alerts.dart' as admin_alerts;
+import 'admin_files/reports.dart' as admin_reports;
+import 'admin_files/control.dart' as admin_control;
+import 'admin_files/updates.dart' as admin_updates;
+import 'admin_files/setting.dart' as admin_setting;
+import 'admin_files/profile.dart' as admin_profile;
+import 'admin_files/security_limits.dart' as admin_security;
+import 'admin_files/settings_provider.dart' as admin_settings;
+import 'admin_files/sensor_testing.dart' as admin_sensors;
+import 'admin_files/users_page.dart' as admin_users;
+
+// استيراد ملفات المستخدم (User)
+import 'user_files/user_dashboard_screen.dart' as user_home;
+import 'user_files/truck_status_sceeen.dart' as user_truck;
+import 'user_files/alerts_screen.dart' as user_alerts;
+import 'user_files/notifications_record_sereen.dart' as user_records;
+import 'user_files/settings_screen.dart' as user_settings_screen;
+
+// استيراد ملفات مشتركة
+import 'admin_files/settings_provider.dart';
+
+// ✅ دالة التحقق من قوة كلمة المرور (تطابق شروط الباك إند تماماً)
+// ✅ دالة التحقق من قوة كلمة المرور (مُصححة)
+String? validatePasswordStrength(String password) {
+  if (password.length < 8) return 'كلمة المرور 8 أحرف على الأقل';
+  if (!password.contains(RegExp(r'[A-Z]')))
+    return 'حرف كبير واحد على الأقل (A-Z)';
+  if (!password.contains(RegExp(r'[a-z]'))) return 'حرف صغير واحد على الأقل';
+  if (!password.contains(RegExp(r'[0-9]'))) return 'رقم واحد على الأقل (0-9)';
+  // ✅ إصلاح خطأ التنصيص في الـ Regex
+  if (!password.contains(
+    RegExp(r'[ !@#$%^&*()_+=\[\]{};:' + "'" + '"' + r'\\|,.<>\/?-]'),
+  )) {
+    return 'رمز خاص واحد على الأقل (! @ #)';
+  }
+  return null; // كلمة المرور صالحة
+}
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final settingsProvider = SettingsProvider();
+  await settingsProvider.loadTheme();
+
+  runApp(
+    ChangeNotifierProvider.value(
+      value: settingsProvider,
+      child: const SafeChainFinalApp(),
+    ),
+  );
+}
+
+class SafeChainFinalApp extends StatelessWidget {
+  const SafeChainFinalApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final settingsProvider = Provider.of<SettingsProvider>(context);
+
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Safe Chain',
+      locale: const Locale('ar', 'SA'),
+      supportedLocales: const [Locale('ar', 'SA')],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      builder: (context, child) {
+        return Directionality(textDirection: TextDirection.rtl, child: child!);
+      },
+      themeMode: settingsProvider.isDarkMode ? ThemeMode.dark : ThemeMode.light,
+      theme: ThemeData(
+        useMaterial3: true,
+        brightness: Brightness.light,
+        scaffoldBackgroundColor: const Color(0xFFC8D6CA),
+        primaryColor: const Color(0xFF1B4332),
+        colorScheme: const ColorScheme.light(
+          primary: Color(0xFF1B4332),
+          secondary: Color(0xFF2D6A4F),
+        ),
+      ),
+      darkTheme: ThemeData(
+        useMaterial3: true,
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: const Color(0xFF121212),
+        primaryColor: const Color(0xFF1B4332),
+        colorScheme: const ColorScheme.dark(
+          primary: Color(0xFF1B4332),
+          secondary: Color(0xFF2D6A4F),
+        ),
+      ),
+      initialRoute: '/',
+      routes: {
+        '/': (context) => const MainNavigator(),
+        '/admin_home': (context) => const admin.DashboardScreen(),
+        '/alerts': (context) => const admin_alerts.AlertsPage(),
+        '/reports': (context) => const admin_reports.ReportsPage(),
+        '/control': (context) => const admin_control.TruckControlPanelApp(),
+        '/updates': (context) => const admin_updates.UpdatesPage(),
+        '/setting': (context) => const admin_setting.SettingsPage(),
+        '/profile': (context) => const admin_profile.ProfilePage(),
+        '/security_limits': (context) =>
+            const admin_security.SecurityLimitsSettings(),
+        '/sensors_check': (context) {
+          final args = ModalRoute.of(context)?.settings.arguments as String?;
+          return admin_sensors.SensorsCheckPage(truckId: args);
+        },
+        '/admin_users': (context) => const admin_users.AdminUsersPage(),
+        '/user_dash': (context) => const user_home.DashboardScreen(),
+        '/user_truck_status': (context) => const user_truck.TruckStatusScreen(),
+        '/user_alerts': (context) => const user_alerts.NotificationsLogScreen(),
+        '/user_reports': (context) =>
+            const user_records.NotificationsRecordScreen(),
+        '/user_settings': (context) =>
+            const user_settings_screen.SettingsScreen(),
+        '/logout': (context) => const LogOutPage(),
+      },
+    );
+  }
+}
+
+// ✅ دالة مركزية للتعامل مع انتهاء الجلسة
+Future<void> handleSessionExpired(BuildContext context) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.remove('auth_token');
+  await prefs.remove('token');
+  await prefs.remove('user_role');
+  await prefs.remove('user_name');
+  await prefs.remove('user_id');
+
+  if (context.mounted) {
+    Navigator.pushNamedAndRemoveUntil(context, '/', (route) => false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'انتهت صلاحية الجلسة، سجل دخولك مجدداً',
+          textAlign: TextAlign.center,
+        ),
+        backgroundColor: Colors.red,
+      ),
+    );
+  }
+}
+
+class MainNavigator extends StatefulWidget {
+  const MainNavigator({super.key});
+
+  @override
+  State<MainNavigator> createState() => _MainNavigatorState();
+}
+
+class _MainNavigatorState extends State<MainNavigator> {
+  String currentView = 'login';
+  String? _tempEmail;
+  String? _tempPassword;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkLoggedInStatus();
+  }
+
+  Future<void> _checkLoggedInStatus() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('auth_token') ?? prefs.getString('token');
+
+    if (token != null && token.isNotEmpty) {
+      try {
+        final response = await http
+            .get(
+              Uri.parse('http://127.0.0.1:8000/verify-token'),
+              headers: {'Authorization': 'Bearer $token'},
+            )
+            .timeout(const Duration(seconds: 10));
+
+        if (!mounted) return;
+
+        if (response.statusCode == 200) {
+          final role = prefs.getString('user_role') ?? 'user';
+          if (role == 'admin') {
+            Navigator.pushReplacementNamed(context, '/admin_home');
+          } else {
+            Navigator.pushReplacementNamed(context, '/user_dash');
+          }
+        } else if (response.statusCode == 401) {
+          await handleSessionExpired(context);
+        }
+      } catch (e) {
+        debugPrint("Token verification error: $e");
+      }
+    }
+  }
+
+  void navigateTo(String view, [String? email, String? password]) {
+    setState(() {
+      currentView = view;
+      if (email != null) _tempEmail = email;
+      if (password != null) _tempPassword = password;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(body: _buildCurrentScreen());
+  }
+
+  Widget _buildCurrentScreen() {
+    switch (currentView) {
+      case 'login':
+        return LoginScreen(onNavigate: navigateTo);
+      case 'signup':
+        return SignUpScreen(onNavigate: navigateTo);
+      case 'reset_password':
+        return ResetPasswordScreen(onNavigate: navigateTo);
+      case 'verification':
+        return VerificationScreen(
+          onNavigate: navigateTo,
+          userEmail: _tempEmail ?? "",
+          userPassword: _tempPassword ?? "",
+        );
+      default:
+        return LoginScreen(onNavigate: navigateTo);
+    }
+  }
+}
+
+// --- صفحة تسجيل الدخول ---
+class LoginScreen extends StatefulWidget {
+  final Function(String, [String?, String?]) onNavigate;
+  const LoginScreen({super.key, required this.onNavigate});
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  bool _obscurePass = true;
+  bool _isLoading = false;
+  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  void _handleLogin() async {
+    if (_isLoading) return;
+
+    String email = _emailController.text.trim();
+    String password = _passwordController.text;
+
+    if (email.isEmpty || password.isEmpty) {
+      _showSnackBar("يرجى تعبئة جميع الحقول", Colors.red);
+      return;
+    }
+
+    setState(() => _isLoading = true);
+
+    try {
+      final url = Uri.parse('http://127.0.0.1:8000/login');
+      final response = await http
+          .post(
+            url,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'email': email, 'password': password}),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      if (!mounted) return;
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final String role = data['role'] ?? 'user';
+        final String token = data['access_token'];
+
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('auth_token', token);
+        await prefs.setString('token', token);
+        await prefs.setString('user_role', role);
+        if (data['full_name'] != null)
+          await prefs.setString('user_name', data['full_name']);
+        if (data['user_id'] != null)
+          await prefs.setInt('user_id', data['user_id']);
+
+        _showSnackBar("تم تسجيل الدخول بنجاح", Colors.green);
+
+        if (role == 'admin') {
+          Navigator.pushReplacementNamed(context, '/admin_home');
+        } else {
+          Navigator.pushReplacementNamed(context, '/user_dash');
+        }
+      } else if (response.statusCode == 429) {
+        _showSnackBar("محاولات كثيرة جداً، حاول بعد قليل", Colors.orange);
+      } else if (response.statusCode == 401) {
+        _showSnackBar("بيانات الدخول غير صحيحة", Colors.red);
+      } else {
+        String errorMessage = "بيانات الدخول غير صحيحة";
+        try {
+          final errorData = jsonDecode(response.body);
+          errorMessage = errorData['detail'] ?? errorMessage;
+        } catch (e) {}
+        _showSnackBar(errorMessage, Colors.red);
+      }
+    } catch (e) {
+      _showSnackBar("فشل الاتصال بالسيرفر", Colors.red);
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  void _showSnackBar(String message, Color color) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message, textAlign: TextAlign.center),
+        backgroundColor: color,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      height: double.infinity,
+      color: Colors.white,
+      child: SingleChildScrollView(
+        child: Column(
+          children: [
+            const SizedBox(height: 80),
+            Image.asset(
+              'assets/logo.png',
+              width: 100,
+              height: 100,
+              errorBuilder: (c, e, s) =>
+                  const Icon(Icons.eco, size: 70, color: Colors.green),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              "SAFE CHAIN",
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 18,
+                color: Color(0xFF1B392A),
+              ),
+            ),
+            const SizedBox(height: 50),
+            const Text(
+              'تسجيل الدخول',
+              style: TextStyle(
+                fontSize: 26,
+                fontWeight: FontWeight.bold,
+                color: Colors.black87,
+              ),
+            ),
+            const SizedBox(height: 40),
+            _simpleField('البريد الالكتروني', controller: _emailController),
+            const SizedBox(height: 15),
+            _simpleField(
+              'كلمة المرور',
+              controller: _passwordController,
+              isPass: true,
+              obs: _obscurePass,
+              toggle: () => setState(() => _obscurePass = !_obscurePass),
+            ),
+            const SizedBox(height: 40),
+            ElevatedButton(
+              onPressed: _isLoading ? null : _handleLogin,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1B392A),
+                minimumSize: const Size(215, 50),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              child: _isLoading
+                  ? const SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: CircularProgressIndicator(
+                        color: Colors.white,
+                        strokeWidth: 2,
+                      ),
+                    )
+                  : const Text(
+                      'دخول',
+                      style: TextStyle(color: Colors.white, fontSize: 16),
+                    ),
+            ),
+            const SizedBox(height: 25),
+            GestureDetector(
+              onTap: () => widget.onNavigate('reset_password'),
+              child: const Text(
+                'نسيت كلمة المرور',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.blueGrey,
+                ),
+              ),
+            ),
+            const SizedBox(height: 15),
+            GestureDetector(
+              onTap: () => widget.onNavigate('signup'),
+              child: const Text(
+                'إنشاء حساب جديد',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF1B392A),
+                ),
+              ),
+            ),
+            const SizedBox(height: 30),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// --- صفحة إنشاء الحساب ---
+class SignUpScreen extends StatefulWidget {
+  final Function(String, [String?, String?]) onNavigate;
+  const SignUpScreen({super.key, required this.onNavigate});
+
+  @override
+  State<SignUpScreen> createState() => _SignUpScreenState();
+}
+
+class _SignUpScreenState extends State<SignUpScreen> {
+  bool _obs1 = true;
+  bool _obs2 = true;
+  bool _isLoading = false;
+  final TextEditingController _nameController = TextEditingController();
+  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _phoneController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
+  final TextEditingController _confirmPasswordController =
+      TextEditingController();
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _emailController.dispose();
+    _phoneController.dispose();
+    _passwordController.dispose();
+    _confirmPasswordController.dispose();
+    super.dispose();
+  }
+
+  void _handleRegister() async {
+    if (_isLoading) return;
+
+    String name = _nameController.text.trim();
+    String email = _emailController.text.trim();
+    String phone = _phoneController.text.trim();
+    String password = _passwordController.text;
+    String confirmPassword = _confirmPasswordController.text;
+
+    if (name.isEmpty || email.isEmpty || phone.isEmpty) {
+      _showSnackBar("يرجى تعبئة جميع الحقول", Colors.red);
+      return;
+    }
+
+    // ✅ التحقق من قوة كلمة المرور
+    String? passError = validatePasswordStrength(password);
+    if (passError != null) {
+      _showSnackBar(passError, Colors.red);
+      return;
+    }
+
+    // ✅ التحقق من تطابق كلمتي المرور
+    if (password != confirmPassword) {
+      _showSnackBar("كلمتا المرور غير متطابقتين", Colors.red);
+      return;
+    }
+
+    setState(() => _isLoading = true);
+
+    try {
+      final url = Uri.parse('http://127.0.0.1:8000/register');
+      final response = await http
+          .post(
+            url,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'full_name': name,
+              'email': email,
+              'phone': phone,
+              'password': password,
+              'confirm_password':
+                  confirmPassword, // ✅ إرسال الحقل المطلوب للباك إند
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      if (!mounted) return;
+
+      if (response.statusCode == 200) {
+        _showSnackBar("تم إنشاء الحساب بنجاح", Colors.green);
+        widget.onNavigate('verification', email, password);
+      } else {
+        // ✅ تحسين عرض أخطاء الـ 422 من الباك إند
+        String errorMessage = "حدث خطأ";
+        try {
+          final errorData = jsonDecode(response.body);
+          if (errorData is Map && errorData.containsKey('detail')) {
+            if (errorData['detail'] is List) {
+              errorMessage = (errorData['detail'] as List)
+                  .map((e) => e['msg'] ?? '')
+                  .join('\n');
+            } else {
+              errorMessage = errorData['detail'].toString();
+            }
+          }
+        } catch (e) {}
+        _showSnackBar(errorMessage, Colors.red);
+      }
+    } catch (e) {
+      _showSnackBar("فشل الاتصال بالسيرفر", Colors.red);
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  void _showSnackBar(String message, Color color) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message, textAlign: TextAlign.center),
+        backgroundColor: color,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      height: double.infinity,
+      color: Colors.white,
+      child: SingleChildScrollView(
+        child: Column(
+          children: [
+            const SizedBox(height: 80),
+            const Text(
+              "إنشاء حساب",
+              style: TextStyle(
+                fontSize: 26,
+                fontWeight: FontWeight.bold,
+                color: Colors.black87,
+              ),
+            ),
+            const SizedBox(height: 40),
+            _simpleField("الاسم الكامل", controller: _nameController),
+            const SizedBox(height: 15),
+            _simpleField("البريد الالكتروني", controller: _emailController),
+            const SizedBox(height: 15),
+            _simpleField(
+              "رقم الهاتف",
+              isNum: true,
+              controller: _phoneController,
+            ),
+            const SizedBox(height: 15),
+            _simpleField(
+              "كلمة المرور ",
+              isPass: true,
+              obs: _obs1,
+              toggle: () => setState(() => _obs1 = !_obs1),
+              controller: _passwordController,
+            ),
+            const SizedBox(height: 15),
+            _simpleField(
+              "تأكيد كلمة المرور",
+              isPass: true,
+              obs: _obs2,
+              toggle: () => setState(() => _obs2 = !_obs2),
+              controller: _confirmPasswordController,
+            ),
+            const SizedBox(height: 40),
+            ElevatedButton(
+              onPressed: _isLoading ? null : _handleRegister,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1B392A),
+                minimumSize: const Size(215, 50),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              child: _isLoading
+                  ? const SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: CircularProgressIndicator(
+                        color: Colors.white,
+                        strokeWidth: 2,
+                      ),
+                    )
+                  : const Text(
+                      "تسجيل",
+                      style: TextStyle(color: Colors.white, fontSize: 16),
+                    ),
+            ),
+            const SizedBox(height: 25),
+            GestureDetector(
+              onTap: () => widget.onNavigate('login'),
+              child: const Text(
+                "العودة لتسجيل الدخول",
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.blueGrey,
+                ),
+              ),
+            ),
+            const SizedBox(height: 30),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// --- صفحة استعادة كلمة المرور ---
+class ResetPasswordScreen extends StatefulWidget {
+  final Function(String, [String?, String?]) onNavigate;
+  const ResetPasswordScreen({super.key, required this.onNavigate});
+
+  @override
+  State<ResetPasswordScreen> createState() => _ResetPasswordScreenState();
+}
+
+class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
+  int _currentStep = 1;
+  bool _obs1 = true;
+  bool _obs2 = true;
+  bool _isLoading = false;
+  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _newPassController = TextEditingController();
+  final TextEditingController _confirmPassController = TextEditingController();
+  final TextEditingController _codeController = TextEditingController();
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _newPassController.dispose();
+    _confirmPassController.dispose();
+    _codeController.dispose();
+    super.dispose();
+  }
+
+  void _showSnackBar(String message, Color color) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message, textAlign: TextAlign.center),
+        backgroundColor: color,
+      ),
+    );
+  }
+
+  void _handleNextStep() async {
+    String newPass = _newPassController.text;
+    String confirmPass = _confirmPassController.text;
+
+    // ✅ التحقق من قوة كلمة المرور الجديدة
+    String? passError = validatePasswordStrength(newPass);
+    if (passError != null) {
+      _showSnackBar(passError, Colors.red);
+      return;
+    }
+
+    if (newPass != confirmPass) {
+      _showSnackBar("كلمتا المرور غير متطابقتين", Colors.red);
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    try {
+      final url = Uri.parse('http://127.0.0.1:8000/send-reset-code');
+      final response = await http
+          .post(
+            url,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'email': _emailController.text.trim()}),
+          )
+          .timeout(const Duration(seconds: 15));
+      if (!mounted) return;
+      if (response.statusCode == 200) {
+        setState(() => _currentStep = 2);
+        _showSnackBar("تم إرسال رمز التحقق", Colors.green);
+      } else {
+        _showSnackBar("فشل إرسال الرمز", Colors.red);
+      }
+    } catch (e) {
+      _showSnackBar("فشل الاتصال", Colors.red);
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  void _handleReset() async {
+    setState(() => _isLoading = true);
+    try {
+      final url = Uri.parse('http://127.0.0.1:8000/reset-password');
+      final response = await http
+          .post(
+            url,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'email': _emailController.text.trim(),
+              'code': _codeController.text.trim(),
+              'new_password': _newPassController.text,
+              'confirm_password': _confirmPassController
+                  .text, // ✅ إرسال الحقل المطلوب للباك إند
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      if (!mounted) return;
+
+      if (response.statusCode == 200) {
+        _showSnackBar("تم تحديث كلمة المرور", Colors.green);
+        widget.onNavigate('login');
+      } else {
+        String msg = "فشل التحديث";
+        try {
+          final errorData = jsonDecode(response.body);
+          if (errorData is Map && errorData.containsKey('detail')) {
+            if (errorData['detail'] is List) {
+              msg = (errorData['detail'] as List)
+                  .map((e) => e['msg'] ?? '')
+                  .join('\n');
+            } else {
+              msg = errorData['detail'].toString();
+            }
+          }
+        } catch (e) {}
+        _showSnackBar(msg, Colors.red);
+      }
+    } catch (e) {
+      _showSnackBar("فشل الاتصال", Colors.red);
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      height: double.infinity,
+      color: Colors.white,
+      child: SingleChildScrollView(
+        child: Column(
+          children: [
+            const SizedBox(height: 80),
+            const Text(
+              "إعادة كلمة المرور",
+              style: TextStyle(
+                fontSize: 26,
+                fontWeight: FontWeight.bold,
+                color: Colors.black87,
+              ),
+            ),
+            const SizedBox(height: 50),
+            if (_currentStep == 1) ...[
+              _simpleField("البريد الالكتروني", controller: _emailController),
+              const SizedBox(height: 15),
+              _simpleField(
+                "كلمة المرور الجديدة",
+                isPass: true,
+                obs: _obs1,
+                toggle: () => setState(() => _obs1 = !_obs1),
+                controller: _newPassController,
+              ),
+              const SizedBox(height: 15),
+              _simpleField(
+                "تأكيد كلمة المرور",
+                isPass: true,
+                obs: _obs2,
+                toggle: () => setState(() => _obs2 = !_obs2),
+                controller: _confirmPassController,
+              ),
+              const SizedBox(height: 40),
+              ElevatedButton(
+                onPressed: _isLoading ? null : _handleNextStep,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF1B392A),
+                  minimumSize: const Size(215, 50),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                child: _isLoading
+                    ? const SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : const Text(
+                        "إرسال رمز التحقق",
+                        style: TextStyle(color: Colors.white, fontSize: 16),
+                      ),
+              ),
+            ] else ...[
+              _simpleField(
+                "البريد الالكتروني",
+                controller: _emailController,
+                enabled: false,
+              ),
+              const SizedBox(height: 15),
+              _simpleField(
+                "رمز التحقق (OTP)",
+                isNum: true,
+                controller: _codeController,
+              ),
+              const SizedBox(height: 40),
+              ElevatedButton(
+                onPressed: _isLoading ? null : _handleReset,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF1B392A),
+                  minimumSize: const Size(215, 50),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                child: _isLoading
+                    ? const SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : const Text(
+                        "تأكيد",
+                        style: TextStyle(color: Colors.white, fontSize: 16),
+                      ),
+              ),
+            ],
+            const SizedBox(height: 25),
+            GestureDetector(
+              onTap: () => widget.onNavigate('login'),
+              child: const Text(
+                "العودة لتسجيل الدخول",
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.blueGrey,
+                ),
+              ),
+            ),
+            const SizedBox(height: 30),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// --- صفحة تأكيد الرمز ---
+class VerificationScreen extends StatefulWidget {
+  final Function(String, [String?, String?]) onNavigate;
+  final String userEmail;
+  final String userPassword;
+  const VerificationScreen({
+    super.key,
+    required this.onNavigate,
+    required this.userEmail,
+    required this.userPassword,
+  });
+
+  @override
+  State<VerificationScreen> createState() => _VerificationScreenState();
+}
+
+class _VerificationScreenState extends State<VerificationScreen> {
+  bool _isLoading = false;
+  final TextEditingController _codeController = TextEditingController();
+
+  @override
+  void dispose() {
+    _codeController.dispose();
+    super.dispose();
+  }
+
+  void _showSnackBar(String message, Color color) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message, textAlign: TextAlign.center),
+        backgroundColor: color,
+      ),
+    );
+  }
+
+  void _handleVerify() async {
+    if (_isLoading) return;
+    setState(() => _isLoading = true);
+
+    try {
+      final verifyUrl = Uri.parse('http://127.0.0.1:8000/verify-email');
+      final verifyResponse = await http
+          .post(
+            verifyUrl,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'email': widget.userEmail,
+              'code': _codeController.text.trim(),
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      if (!mounted) return;
+
+      if (verifyResponse.statusCode == 200) {
+        final loginUrl = Uri.parse('http://127.0.0.1:8000/login');
+        final loginResponse = await http
+            .post(
+              loginUrl,
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({
+                'email': widget.userEmail,
+                'password': widget.userPassword,
+              }),
+            )
+            .timeout(const Duration(seconds: 15));
+
+        if (!mounted) return;
+
+        if (loginResponse.statusCode == 200) {
+          final data = jsonDecode(loginResponse.body);
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('auth_token', data['access_token']);
+          await prefs.setString('token', data['access_token']);
+          await prefs.setString('user_role', data['role'] ?? 'user');
+          if (data['full_name'] != null)
+            await prefs.setString('user_name', data['full_name']);
+          if (data['user_id'] != null)
+            await prefs.setInt('user_id', data['user_id']);
+
+          _showSnackBar("تم التحقق وتسجيل الدخول", Colors.green);
+          if (data['role'] == 'admin') {
+            Navigator.pushReplacementNamed(context, '/admin_home');
+          } else {
+            Navigator.pushReplacementNamed(context, '/user_dash');
+          }
+        } else {
+          _showSnackBar("فشل تسجيل الدخول التلقائي", Colors.red);
+          widget.onNavigate('login');
+        }
+      } else {
+        _showSnackBar("رمز التحقق غير صحيح", Colors.red);
+      }
+    } catch (e) {
+      _showSnackBar("فشل الاتصال بالسيرفر", Colors.red);
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      height: double.infinity,
+      color: Colors.white,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Text(
+            "أدخل رمز التحقق",
+            style: TextStyle(
+              fontSize: 26,
+              fontWeight: FontWeight.bold,
+              color: Colors.black87,
+            ),
+          ),
+          const SizedBox(height: 30),
+          _simpleField(
+            "الرمز المكون من 4 أرقام",
+            isNum: true,
+            controller: _codeController,
+          ),
+          const SizedBox(height: 40),
+          ElevatedButton(
+            onPressed: _isLoading ? null : _handleVerify,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF1B392A),
+              minimumSize: const Size(215, 50),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            child: _isLoading
+                ? const SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(
+                      color: Colors.white,
+                      strokeWidth: 2,
+                    ),
+                  )
+                : const Text(
+                    "تأكيد ودخول",
+                    style: TextStyle(color: Colors.white, fontSize: 16),
+                  ),
+          ),
+          const SizedBox(height: 25),
+          GestureDetector(
+            onTap: () => widget.onNavigate('login'),
+            child: const Text(
+              "العودة لتسجيل الدخول",
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+                color: Colors.blueGrey,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// --- Widget مشترك لحقل الإدخال ---
+Widget _simpleField(
+  String hint, {
+  TextEditingController? controller,
+  bool isPass = false,
+  bool obs = false,
+  VoidCallback? toggle,
+  bool isNum = false,
+  bool enabled = true,
+}) {
+  return Container(
+    width: 280,
+    decoration: BoxDecoration(
+      color: const Color(0xFFF0F0F0),
+      borderRadius: BorderRadius.circular(12),
+    ),
+    child: TextField(
+      controller: controller,
+      obscureText: isPass ? obs : false,
+      keyboardType: isNum ? TextInputType.number : TextInputType.text,
+      textAlign: TextAlign.right,
+      enabled: enabled,
+      style: const TextStyle(fontSize: 14),
+      decoration: InputDecoration(
+        hintText: hint,
+        hintStyle: TextStyle(color: Colors.grey[600]),
+        border: InputBorder.none,
+        contentPadding: const EdgeInsets.symmetric(
+          vertical: 15,
+          horizontal: 20,
+        ),
+        suffixIcon: isPass
+            ? IconButton(
+                icon: Icon(
+                  obs ? Icons.visibility_off : Icons.visibility,
+                  size: 20,
+                  color: Colors.grey[700],
+                ),
+                onPressed: toggle,
+              )
+            : null,
+      ),
+    ),
+  );
+}
