@@ -1,0 +1,924 @@
+import 'dart:convert';
+import 'dart:typed_data';
+import 'package:excel/excel.dart' as xl;
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import '../admin_files/settings_provider.dart';
+import '../admin_files/file_saver.dart';
+import 'app_drawer.dart';
+
+class NotificationsLogScreen extends StatefulWidget {
+  const NotificationsLogScreen({super.key});
+
+  @override
+  State<NotificationsLogScreen> createState() => _NotificationsLogScreenState();
+}
+
+class _NotificationsLogScreenState extends State<NotificationsLogScreen> {
+  String _fromDate = "";
+  String _toDate = "";
+  String _truckId = "";
+  String _searchQuery = "";
+  final TextEditingController _searchController = TextEditingController();
+  final TextEditingController _truckIdController = TextEditingController();
+
+  List<dynamic> alerts = [];
+  bool isLoading = false;
+  bool _isExporting = false;
+
+  // Pagination
+  int _currentPage = 1;
+  int _totalCount = 0;
+  static const int _pageSize = 20;
+
+  static const String _baseUrl = "http://127.0.0.1:8000";
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _truckIdController.dispose();
+    super.dispose();
+  }
+
+  Future<String?> _getToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('auth_token') ?? prefs.getString('token');
+  }
+
+  Future<void> fetchAlerts({int page = 1}) async {
+    if (!mounted) return;
+    setState(() => isLoading = true);
+
+    try {
+      final token = await _getToken();
+      if (token == null || token.isEmpty) {
+        _redirectToLogin();
+        return;
+      }
+
+      final Map<String, String> queryParams = {
+        'page': page.toString(),
+        'limit': _pageSize.toString(),
+      };
+      if (_truckId.isNotEmpty) queryParams['truck_id'] = _truckId;
+      if (_searchQuery.isNotEmpty) queryParams['search'] = _searchQuery;
+      if (_fromDate.isNotEmpty) queryParams['start_date'] = _fromDate;
+      if (_toDate.isNotEmpty) queryParams['end_date'] = _toDate;
+
+      final queryString = queryParams.entries
+          .map((e) => '${e.key}=${Uri.encodeComponent(e.value)}')
+          .join('&');
+
+      final response = await http
+          .get(
+            Uri.parse('$_baseUrl/alerts?$queryString'),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $token',
+            },
+          )
+          .timeout(const Duration(seconds: 15));
+
+      if (!mounted) return;
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        setState(() {
+          alerts = data['data'] ?? [];
+          _totalCount = data['total'] ?? 0;
+          _currentPage = page;
+        });
+      } else if (response.statusCode == 401) {
+        _redirectToLogin();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('خطأ: ${response.statusCode}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('ERROR: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('خطأ في الاتصال بالخادم'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => isLoading = false);
+    }
+  }
+
+  void _redirectToLogin() {
+    if (mounted) {
+      Navigator.of(context).pushNamedAndRemoveUntil('/', (route) => false);
+    }
+  }
+
+  // Export functions - Client-side generation
+  Future<void> _exportToExcel() async {
+    if (alerts.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('لا توجد بيانات للتصدير'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      return;
+    }
+    setState(() => _isExporting = true);
+    try {
+      final excel = xl.Excel.createExcel();
+      final sheet = excel['التنبيهات'];
+      excel.setDefaultSheet('التنبيهات');
+
+      final headers = [
+        'التاريخ',
+        'سبب التنبيه',
+        'رقم الشحنة',
+        'المدة (ثانية)',
+        'خط العرض',
+        'خط الطول',
+      ];
+      for (var i = 0; i < headers.length; i++) {
+        final cell = sheet.cell(
+          xl.CellIndex.indexByColumnRow(columnIndex: i, rowIndex: 0),
+        );
+        cell.value = xl.TextCellValue(headers[i]);
+        cell.cellStyle = xl.CellStyle(
+          bold: true,
+          backgroundColorHex: xl.ExcelColor.fromHexString('#1B4332'),
+          fontColorHex: xl.ExcelColor.fromHexString('#FFFFFF'),
+        );
+      }
+
+      for (var i = 0; i < alerts.length; i++) {
+        final a = alerts[i];
+        final row = i + 1;
+        sheet
+            .cell(xl.CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: row))
+            .value = xl.TextCellValue(
+          a['full_date']?.toString() ?? a['date']?.toString() ?? '-',
+        );
+        sheet
+            .cell(xl.CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: row))
+            .value = xl.TextCellValue(
+          a['alert_reason']?.toString() ?? a['type']?.toString() ?? '-',
+        );
+        sheet
+            .cell(xl.CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: row))
+            .value = xl.TextCellValue(
+          a['shipment_number']?.toString() ?? '-',
+        );
+        sheet
+            .cell(xl.CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: row))
+            .value = xl.TextCellValue(
+          a['duration']?.toString() ?? '-',
+        );
+        sheet
+            .cell(xl.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: row))
+            .value = xl.TextCellValue(
+          a['latitude']?.toString() ?? '-',
+        );
+        sheet
+            .cell(xl.CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: row))
+            .value = xl.TextCellValue(
+          a['longitude']?.toString() ?? '-',
+        );
+      }
+
+      final bytes = excel.save()!;
+      final fileName = 'alerts_${DateTime.now().millisecondsSinceEpoch}.xlsx';
+      final mimeType =
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+      await saveFile(Uint8List.fromList(bytes), fileName, mimeType);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('تم تصدير Excel بنجاح ✅'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('❌ Export Excel error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('خطأ في تصدير Excel: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isExporting = false);
+    }
+  }
+
+  Future<void> _exportToPdf() async {
+    if (alerts.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('لا توجد بيانات للتصدير'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      return;
+    }
+    setState(() => _isExporting = true);
+    try {
+      final font = await PdfGoogleFonts.cairoRegular();
+      final fontBold = await PdfGoogleFonts.cairoBold();
+      final pdf = pw.Document();
+
+      pdf.addPage(
+        pw.MultiPage(
+          pageFormat: PdfPageFormat.a4.landscape,
+          textDirection: pw.TextDirection.rtl,
+          build: (ctx) => [
+            pw.Text(
+              'سجل التنبيهات',
+              style: pw.TextStyle(
+                font: fontBold,
+                fontSize: 18,
+                color: PdfColor.fromHex('#1B4332'),
+              ),
+            ),
+            pw.SizedBox(height: 10),
+            pw.TableHelper.fromTextArray(
+              headers: [
+                'التاريخ',
+                'سبب التنبيه',
+                'رقم الشحنة',
+                'المدة',
+                'خط العرض',
+                'خط الطول',
+              ],
+              data: alerts
+                  .map(
+                    (a) => [
+                      a['full_date']?.toString() ??
+                          a['date']?.toString() ??
+                          '-',
+                      a['alert_reason']?.toString() ??
+                          a['type']?.toString() ??
+                          '-',
+                      a['shipment_number']?.toString() ?? '-',
+                      a['duration']?.toString() ?? '-',
+                      a['latitude']?.toString() ?? '-',
+                      a['longitude']?.toString() ?? '-',
+                    ],
+                  )
+                  .toList(),
+              headerStyle: pw.TextStyle(
+                font: fontBold,
+                color: PdfColors.white,
+                fontSize: 8,
+              ),
+              headerDecoration: const pw.BoxDecoration(
+                color: PdfColor.fromInt(0xFF1B4332),
+              ),
+              cellStyle: pw.TextStyle(font: font, fontSize: 7),
+              oddRowDecoration: pw.BoxDecoration(
+                color: PdfColor.fromHex('#F5F5F5'),
+              ),
+              cellAlignment: pw.Alignment.center,
+            ),
+          ],
+        ),
+      );
+
+      final bytes = await pdf.save();
+      final fileName = 'alerts_${DateTime.now().millisecondsSinceEpoch}.pdf';
+      await saveFile(bytes, fileName, 'application/pdf');
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('تم تصدير PDF بنجاح ✅'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('❌ Export PDF error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('خطأ في تصدير PDF: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isExporting = false);
+    }
+  }
+
+  Color getAlertColor(String? type, bool isDark) {
+    if (type == "Temperature") return Colors.red.withValues(alpha: 0.2);
+    if (type == "Humidity") return Colors.orange.withValues(alpha: 0.2);
+    if (type == "Gas") return Colors.purple.withValues(alpha: 0.2);
+    return isDark ? const Color(0xFF2C2C2C) : Colors.white;
+  }
+
+  Future<void> _selectDate(BuildContext context, bool isFromDate) async {
+    final DateTime? picked = await showDatePicker(
+      context: context,
+      initialDate: DateTime.now(),
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2030),
+      builder: (context, child) {
+        return Theme(
+          data: Theme.of(context).copyWith(
+            colorScheme: const ColorScheme.light(
+              primary: Color(0xFF1B4332),
+              onPrimary: Colors.white,
+              onSurface: Colors.black,
+            ),
+          ),
+          child: child!,
+        );
+      },
+    );
+
+    if (picked != null && mounted) {
+      String formattedDate =
+          "${picked.year}-${picked.month.toString().padLeft(2, '0')}-${picked.day.toString().padLeft(2, '0')}";
+      setState(() {
+        if (isFromDate) {
+          _fromDate = formattedDate;
+        } else {
+          _toDate = formattedDate;
+        }
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final settingsProvider = Provider.of<SettingsProvider>(context);
+    final bool isDark = settingsProvider.isDarkMode;
+
+    return Scaffold(
+      backgroundColor: isDark
+          ? const Color(0xFF121212)
+          : const Color(0xFFC8D6CA),
+      drawer: const SafeChainUserDrawer(),
+      appBar: AppBar(
+        backgroundColor: isDark
+            ? const Color(0xFF1A1A1A)
+            : const Color(0xFF1B4332),
+        elevation: 0,
+        centerTitle: true,
+        leading: Builder(
+          builder: (context) => IconButton(
+            icon: const Icon(Icons.menu, color: Colors.white),
+            onPressed: () => Scaffold.of(context).openDrawer(),
+          ),
+        ),
+        title: const Text(
+          "سجل التنبيهات",
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        ),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(left: 16.0, right: 8),
+            child: CircleAvatar(
+              backgroundColor: Colors.white,
+              radius: 18,
+              child: ClipOval(
+                child: Image.asset(
+                  'assets/logo.png',
+                  width: 32,
+                  height: 32,
+                  fit: BoxFit.cover,
+                  errorBuilder: (c, e, s) =>
+                      const Icon(Icons.eco, color: Colors.green),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 900),
+          child: Column(
+            children: [
+              Container(
+                margin: const EdgeInsets.only(top: 20, left: 15, right: 15),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 15,
+                ),
+                decoration: BoxDecoration(
+                  color: isDark
+                      ? const Color(0xFF1E1E1E)
+                      : const Color(0xFFE0E0E0),
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(20),
+                    topRight: Radius.circular(20),
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.05),
+                      blurRadius: 10,
+                    ),
+                  ],
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      "سجل التنبيهات",
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        color: isDark ? Colors.white : Colors.black87,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 15),
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    color: isDark
+                        ? const Color(0xFF2C2C2C)
+                        : const Color(0xFFC5D1C5),
+                    borderRadius: const BorderRadius.only(
+                      bottomLeft: Radius.circular(20),
+                      bottomRight: Radius.circular(20),
+                    ),
+                  ),
+                  child: SingleChildScrollView(
+                    physics: const BouncingScrollPhysics(),
+                    child: Column(
+                      children: [
+                        // Row 1: Search + Truck ID
+                        Row(
+                          children: [
+                            Expanded(child: _buildSearchField(isDark)),
+                            const SizedBox(width: 15),
+                            Expanded(child: _buildTruckIdField(isDark)),
+                          ],
+                        ),
+                        const SizedBox(height: 15),
+                        // Row 2: Date fields
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _buildDateField(
+                                _fromDate,
+                                "من تاريخ",
+                                isDark,
+                                () => _selectDate(context, true),
+                              ),
+                            ),
+                            const SizedBox(width: 15),
+                            Expanded(
+                              child: _buildDateField(
+                                _toDate,
+                                "إلى تاريخ",
+                                isDark,
+                                () => _selectDate(context, false),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 15),
+                        // Row 3: Full-width Apply Button
+                        SizedBox(
+                          width: double.infinity,
+                          child: _buildApplyButton(),
+                        ),
+                        const SizedBox(height: 30),
+                        _buildAlertsTable(isDark),
+                        if (_totalCount > _pageSize && !isLoading)
+                          _buildPaginationBar(isDark),
+                        const SizedBox(height: 20),
+                        // Export buttons
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          children: [
+                            _buildExportButton(
+                              "تصدير PDF",
+                              Icons.picture_as_pdf,
+                              _exportToPdf,
+                            ),
+                            _buildExportButton(
+                              "تصدير Excel",
+                              Icons.table_chart,
+                              _exportToExcel,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSearchField(bool isDark) {
+    return Container(
+      height: 45,
+      decoration: BoxDecoration(
+        color: isDark
+            ? Colors.white.withValues(alpha: 0.1)
+            : Colors.white.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: TextField(
+        controller: _searchController,
+        onChanged: (value) => setState(() => _searchQuery = value),
+        textAlign: TextAlign.right,
+        style: TextStyle(color: isDark ? Colors.white : Colors.black87),
+        decoration: InputDecoration(
+          hintText: "بحث برقم الشحنة...",
+          hintStyle: TextStyle(color: isDark ? Colors.white54 : Colors.black54),
+          prefixIcon: Icon(
+            Icons.search,
+            color: isDark ? Colors.white54 : Colors.black54,
+          ),
+          border: InputBorder.none,
+          contentPadding: const EdgeInsets.symmetric(vertical: 12),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTruckIdField(bool isDark) {
+    return Container(
+      height: 45,
+      decoration: BoxDecoration(
+        color: isDark
+            ? Colors.white.withValues(alpha: 0.1)
+            : Colors.white.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: TextField(
+        controller: _truckIdController,
+        onChanged: (value) => setState(() => _truckId = value),
+        keyboardType: TextInputType.number,
+        textAlign: TextAlign.right,
+        style: TextStyle(color: isDark ? Colors.white : Colors.black87),
+        decoration: InputDecoration(
+          hintText: "رقم الشاحنة (اختياري)...",
+          hintStyle: TextStyle(color: isDark ? Colors.white54 : Colors.black54),
+          prefixIcon: Icon(
+            Icons.local_shipping,
+            color: isDark ? Colors.white54 : Colors.black54,
+          ),
+          border: InputBorder.none,
+          contentPadding: const EdgeInsets.symmetric(vertical: 12),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDateField(
+    String date,
+    String label,
+    bool isDark,
+    VoidCallback onTap,
+  ) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              color: isDark ? Colors.white70 : Colors.black87,
+            ),
+          ),
+          const SizedBox(height: 5),
+          Container(
+            height: 40,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            alignment: Alignment.centerRight,
+            decoration: BoxDecoration(
+              color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Icon(
+                  Icons.calendar_today,
+                  size: 16,
+                  color: isDark ? Colors.white54 : Colors.black54,
+                ),
+                Text(
+                  date.isEmpty ? "اختر التاريخ" : date,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: isDark ? Colors.white : Colors.black87,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildApplyButton() {
+    return ElevatedButton.icon(
+      onPressed: isLoading
+          ? null
+          : () {
+              _currentPage = 1; // Reset to first page when applying filters
+              fetchAlerts();
+            },
+      style: ElevatedButton.styleFrom(
+        backgroundColor: const Color(0xFF1B4332),
+        disabledBackgroundColor: const Color(0xFF1B4332).withValues(alpha: 0.5),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+        minimumSize: const Size(double.infinity, 44),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ),
+      icon: isLoading
+          ? const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                color: Colors.white,
+                strokeWidth: 2,
+              ),
+            )
+          : const Icon(Icons.filter_list, size: 18, color: Colors.white),
+      label: Text(
+        isLoading ? "جاري التطبيق..." : "تطبيق الفلاتر",
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 14,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAlertsTable(bool isDark) {
+    if (isLoading) {
+      return const SizedBox(
+        height: 200,
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    if (alerts.isEmpty) {
+      return Container(
+        height: 200,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.08),
+              blurRadius: 8,
+            ),
+          ],
+        ),
+        alignment: Alignment.center,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.inbox_outlined,
+              size: 50,
+              color: isDark ? Colors.white24 : Colors.black26,
+            ),
+            const SizedBox(height: 10),
+            Text(
+              "لا توجد تنبيهات",
+              style: TextStyle(
+                color: isDark ? Colors.white54 : Colors.black45,
+                fontSize: 14,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
+        boxShadow: [
+          BoxShadow(color: Colors.black.withValues(alpha: 0.1), blurRadius: 8),
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: SingleChildScrollView(
+          child: Table(
+            columnWidths: const {
+              0: FixedColumnWidth(120),
+              1: FixedColumnWidth(110),
+              2: FixedColumnWidth(150),
+              3: FixedColumnWidth(100),
+            },
+            children: [
+              _tableHeader([
+                "التاريخ",
+                "رقم الشحنة",
+                "سبب التنبيه",
+                "مدة التنبيه",
+              ]),
+              ...alerts.map((alert) {
+                final type =
+                    alert['type']?.toString() ??
+                    alert['alert_reason']?.toString() ??
+                    '';
+                final color = getAlertColor(type, isDark);
+                return _tableRow(
+                  [
+                    alert["date"]?.toString() ??
+                        alert["full_date"]?.toString() ??
+                        "-",
+                    alert["shipment_number"]?.toString() ?? "-",
+                    type,
+                    alert["duration"]?.toString() ?? "-",
+                  ],
+                  color,
+                  isDark,
+                );
+              }),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  TableRow _tableHeader(List<String> titles) {
+    return TableRow(
+      decoration: const BoxDecoration(color: Color(0xFF1B4332)),
+      children: titles
+          .map(
+            (t) => Padding(
+              padding: const EdgeInsets.all(12.0),
+              child: Text(
+                t,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          )
+          .toList(),
+    );
+  }
+
+  TableRow _tableRow(List<String> cells, Color color, bool isDark) {
+    return TableRow(
+      decoration: BoxDecoration(color: color),
+      children: cells
+          .map(
+            (text) => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 15, horizontal: 5),
+              child: Text(
+                text,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  color: isDark ? Colors.white : Colors.black87,
+                ),
+              ),
+            ),
+          )
+          .toList(),
+    );
+  }
+
+  Widget _buildPaginationBar(bool isDark) {
+    final totalPages = (_totalCount / _pageSize).ceil().clamp(1, 9999);
+    final Color btnColor = isDark ? const Color(0xFF1E1E1E) : Colors.white;
+    final Color activeColor = const Color(0xFF1B4332);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          IconButton(
+            icon: Icon(
+              Icons.chevron_right,
+              color: _currentPage > 1 ? activeColor : Colors.grey,
+            ),
+            onPressed: _currentPage > 1
+                ? () => fetchAlerts(page: _currentPage - 1)
+                : null,
+          ),
+          ...List.generate(totalPages.clamp(0, 5), (i) {
+            final page = i + 1;
+            final isActive = page == _currentPage;
+            return GestureDetector(
+              onTap: () => fetchAlerts(page: page),
+              child: Container(
+                margin: const EdgeInsets.symmetric(horizontal: 3),
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: isActive ? activeColor : btnColor,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: isActive
+                        ? activeColor
+                        : Colors.grey.withValues(alpha: 0.3),
+                  ),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  "$page",
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: isActive
+                        ? Colors.white
+                        : (isDark ? Colors.white : Colors.black87),
+                    fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                  ),
+                ),
+              ),
+            );
+          }),
+          IconButton(
+            icon: Icon(
+              Icons.chevron_left,
+              color: _currentPage < totalPages ? activeColor : Colors.grey,
+            ),
+            onPressed: _currentPage < totalPages
+                ? () => fetchAlerts(page: _currentPage + 1)
+                : null,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildExportButton(
+    String title,
+    IconData icon,
+    Future<void> Function() onPressed,
+  ) {
+    return ElevatedButton.icon(
+      onPressed: _isExporting ? null : onPressed,
+      icon: _isExporting
+          ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(
+                color: Colors.white,
+                strokeWidth: 2,
+              ),
+            )
+          : Icon(icon, size: 18, color: Colors.white),
+      label: Text(
+        _isExporting ? "جاري التصدير..." : title,
+        style: const TextStyle(color: Colors.white, fontSize: 13),
+      ),
+      style: ElevatedButton.styleFrom(
+        backgroundColor: const Color(0xFF1B4332),
+        disabledBackgroundColor: Colors.grey,
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ),
+    );
+  }
+}
