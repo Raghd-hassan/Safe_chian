@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+sqlalchemy
+pymysql
+paho-mqtt
+prometheus-fastapi-instrumentator
+prometheus-client
+passlib
+python-multipart
+reportlab
+openpyxl
+python-jose[cryptography]
+bcrypt
+email_validator
+FPDF
+arabic_reshaper
